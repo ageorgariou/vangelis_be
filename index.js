@@ -8,7 +8,11 @@ const { google } = require('googleapis');
 
 const app = express();
 app.use(bodyParser.json());
-app.use(cors());
+app.use(cors({
+  origin: '*', // Allow all origins
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allow specific HTTP methods
+  allowedHeaders: ['Content-Type', 'Authorization'] // Allow specific headers
+}));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 

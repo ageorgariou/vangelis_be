@@ -29,6 +29,7 @@ let config = {
   }
 };
 
+
 // Google Sheets setup
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SHEETS_CREDENTIALS),

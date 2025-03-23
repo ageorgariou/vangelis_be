@@ -1,159 +1,187 @@
 // server.js
 require('dotenv').config();
 const express = require('express');
-const axios = require('axios');
-// const { google } = require('googleapis');
 const cors = require('cors');
-const xlsx = require('xlsx');
-const path = require('path');
-const AWS = require('aws-sdk');
-const { S3 } = require('aws-sdk');
-
+const { OpenAI } = require('openai');
+const AWS = require('@aws-sdk/client-s3');
+const { GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
+const XLSX = require('xlsx');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
-app.use(cors({
-  origin: '*', // Allow all origins or specify like 'https://your-ngrok-url.ngrok.io'
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
 
-const port = process.env.PORT || 3000;
+// Initialize clients
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Configure AWS SDK
-AWS.config.update({
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    region: process.env.AWS_REGION
-});
-
-const s3 = new S3();
-
-// Endpoint to make a web call
-app.post('/create-web-call', async (req, res) => {
-    const agent_id = process.env.AGENT_ID; // Get agent_id from environment variables
-
-    try {
-        const response = await axios.post(
-            'https://api.retellai.com/v2/create-web-call',
-            { agent_id },
-            {
-                headers: {
-                    'Authorization': `Bearer ${process.env.BEARER_TOKEN}`,
-                    'Content-Type': 'application/json',
-                },
-            }
-        );
-        res.status(201).json(response.data);
-    } catch (error) {
-        console.error('Error creating web call:', error.response?.data || error.message);
-        res.status(500).json({ error: 'Failed to create web call' });
+const s3Client = new AWS.S3({
+    region: process.env.AWS_REGION,
+    credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
     }
 });
 
-// Function to update a local Excel spreadsheet
-async function updateLocalSpreadsheet(data) {
-    const filePath = path.join(__dirname, 'local_spreadsheet.xlsx'); // Path to your local Excel file
+// Session storage
+const sessions = new Map();
 
-    // Read the existing workbook
-    let workbook;
-    try {
-        workbook = xlsx.readFile(filePath);
-    } catch (error) {
-        // If the file doesn't exist, create a new workbook
-        workbook = xlsx.utils.book_new();
-    }
-
-    // Get the first sheet or create a new one
-    const sheetName = 'Sheet1';
-    let worksheet = workbook.Sheets[sheetName];
-    if (!worksheet) {
-        worksheet = xlsx.utils.aoa_to_sheet([]);
-        xlsx.utils.book_append_sheet(workbook, worksheet, sheetName);
-    }
-
-    // Convert the data to a row format
-    const newRow = [data.date, data.fullname, data.interest, data.phone, data.email];
-
-    // Append the new row to the worksheet
-    const sheetData = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
-    sheetData.push(newRow);
-    const newWorksheet = xlsx.utils.aoa_to_sheet(sheetData);
-
-    // Replace the old sheet with the new one
-    workbook.Sheets[sheetName] = newWorksheet;
-
-    // Write the updated workbook to a buffer
-    const buffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
-
-    // Upload the buffer to S3
+// Helper functions
+const updateXLSX = async (userData) => {
+    console.log('User Data:', userData);
     const params = {
-        Bucket: process.env.S3_BUCKET_NAME,
-        Key: 'local_spreadsheet.xlsx',
-        Body: buffer,
-        ContentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        Bucket: process.env.S3_BUCKET,
+        Key: 'users_vangelis_2.xlsx'
     };
 
     try {
-        await s3.upload(params).promise();
-        console.log('File uploaded successfully to S3');
-    } catch (error) {
-        console.error('Error uploading file to S3:', error.message);
-        throw new Error('Failed to upload file to S3');
-    }
-}
+        const { Body } = await s3Client.send(new GetObjectCommand(params));
+        const buffer = await Body.transformToByteArray();
+        const workbook = XLSX.read(buffer);
+        const ws = workbook.Sheets[workbook.SheetNames[0]];
 
-// Webhook endpoint to receive post-analysis data
-app.post('/webhook', async (req, res) => {
-    const postAnalysisData = req.body;
-
-    if (postAnalysisData.event === 'call_analyzed') {
-        let analysis;
-        try {
-            const response = await axios.get(`https://api.retellai.com/v2/get-call/${postAnalysisData.call.call_id}`, {
-                headers: {
-                    'Authorization': `Bearer ${process.env.BEARER_TOKEN}`
-                }
-            });
-            const callData = response.data;
-            analysis = callData.call_analysis;
-
-            console.log(analysis);
-
-            // Update local spreadsheet with custom_analysis_data
-            try {
-                await updateLocalSpreadsheet(analysis.custom_analysis_data);
-                res.status(200).json({ message: 'Webhook processed and data added to local spreadsheet successfully' });
-            } catch (error) {
-                console.error('Error updating local spreadsheet:', error.message);
-                res.status(500).json({ error: 'Failed to update local spreadsheet' });
-            }
-
-        } catch (err) {
-            console.error("Error fetching or saving call analysis for call ID", postAnalysisData.call.call_id, err.response?.data || err.message);
-            res.status(500).json({ error: 'Failed to process webhook' });
+        // Ensure headers are present
+        if (!ws['A1']) {
+            console.log('Adding headers');
+            XLSX.utils.sheet_add_aoa(ws, [['full_name', 'email', 'phone']], { origin: 'A1' });
         }
-    } else {
-        res.status(400).json({ error: 'Invalid event type' });
+
+        // Log userData to verify structure
+        console.log('User Data to be added:', userData);
+
+        // Append new data
+        XLSX.utils.sheet_add_json(ws, [userData], { skipHeader: true, origin: -1 });
+        const updated = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+        console.log('Updated XLSX:', updated);
+
+        await s3Client.send(new PutObjectCommand({
+            ...params,
+            Body: updated
+        }));
+    } catch (error) {
+        console.error('Error updating XLSX:', error);
+
+        // Create a new workbook if the file doesn't exist
+        const newWB = XLSX.utils.book_new();
+        const newWS = XLSX.utils.json_to_sheet([userData], { header: ['full_name', 'email', 'phone'] });
+        XLSX.utils.book_append_sheet(newWB, newWS, 'Users Vangelis');
+        const data = XLSX.write(newWB, { type: 'buffer' });
+        console.log('New XLSX:', data);
+        await s3Client.send(new PutObjectCommand({
+            ...params,
+            Body: data
+        }));
+    }
+};
+
+// Chat endpoint
+app.post('/api/chat', async (req, res) => {
+    const { sessionId, messages } = req.body;
+    if (!sessions.has(sessionId)) {
+        sessions.set(sessionId, {
+            info: { fullName: null, email: null, phone: null },
+            needsInfo: false
+        });
+    }
+
+    const session = sessions.get(sessionId);
+    const lastMessage = messages[messages.length - 1]?.content || '';
+
+    // Use OpenAI to detect intent and extract information
+    try {
+        const aiResponse = await openai.chat.completions.create({
+            model: 'gpt-3.5-turbo',
+            messages: [{
+                role: 'system',
+                content: 'Extract intent and user information (full name, email, phone) from the following message and return it as a JSON object:'
+            }, {
+                role: 'user',
+                content: lastMessage
+            }],
+            temperature: 0.6,
+        });
+
+        // Log the response for debugging
+        console.log('AI Response:', aiResponse.choices[0].message.content);
+
+        // Attempt to parse the response
+        let extractedInfo;
+        try {
+            extractedInfo = JSON.parse(aiResponse.choices[0].message.content);
+            console.log('Extracted Info:', extractedInfo);
+        } catch (parseError) {
+            console.error('Failed to parse AI response:', parseError);
+            return res.status(500).json({ message: 'Σφάλμα κατά την επεξεργασία της απάντησης AI.' });
+        }
+
+        Object.keys(extractedInfo).forEach(key => {
+            if (extractedInfo[key]) session.info[key] = extractedInfo[key];
+        });
+
+        // Check missing fields
+        const missing = [];
+        console.log('Session Info:', session.info);
+
+        if (session.info.user || session.info.user_information) {
+            const user = session.info.user || {};
+            const userInformation = session.info.user_information || {};
+
+            if (!user.full_name && !userInformation.full_name) missing.push('ονοματεπώνυμο');
+            if (!user.email && !userInformation.email) missing.push('email');
+            if (!user.phone && !userInformation.phone) missing.push('τηλέφωνο');
+        } else {
+            missing.push('Πληροφορίες χρήστη');
+        }
+
+        if (missing.length > 0) {
+            return res.json({
+                message: `Παρακαλώ δώστε ${missing.join(' και ')} σας:`,
+                needsInfo: true
+            });
+        }
+
+        // All info collected
+        await updateXLSX(session.info.user_information);
+        session.needsInfo = false;
+
+        // Generate AI response
+        const response = await openai.chat.completions.create({
+            model: 'gpt-3.5-turbo',
+            messages: [{
+                role: 'system',
+                content: `Απάντα στα Ελληνικά. Πληροφορίες χρήστη: ${JSON.stringify(session.info)}`
+            }, ...messages],
+            temperature: 0.6,
+        });
+        console.log('AI Response 2:', response.choices[0].message.content);
+        res.json({
+            message: response.choices[0].message.content,
+            needsInfo: false
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Σφάλμα συστήματος. Παρακαλώ δοκιμάστε ξανά.' });
     }
 });
 
-app.get('/generate-presigned-url', async (req, res) => {
+// Route to download the XLSX sheet
+app.get('/api/download-users', async (req, res) => {
     const params = {
-        Bucket: process.env.S3_BUCKET_NAME,
-        Key: 'local_spreadsheet.xlsx',
-        Expires: 60 // URL expires in 60 seconds
+        Bucket: process.env.S3_BUCKET,
+        Key: 'users_vangelis_2.xlsx'
     };
 
     try {
-        const url = await s3.getSignedUrlPromise('getObject', params);
-        res.status(200).json({ url });
+        const { Body } = await s3Client.send(new GetObjectCommand(params));
+        const buffer = await Body.transformToByteArray();
+
+        res.setHeader('Content-Disposition', 'attachment; filename=users_vangelis_2.xlsx');
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.send(buffer);
     } catch (error) {
-        console.error('Error generating pre-signed URL:', error.message);
-        res.status(500).json({ error: 'Failed to generate pre-signed URL' });
+        console.error(error);
+        res.status(500).json({ message: 'Σφάλμα κατά τη λήψη του αρχείου.' });
     }
 });
 
-app.listen(port, () => {
-    console.log(`Server is running on http://localhost:${port}`);
-});
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));

@@ -233,5 +233,19 @@ app.post('/add-urls', (req, res) => {
   }
 });
 
+app.post('/update-spreadsheet-id', (req, res) => {
+  try {
+    const { spreadsheetId } = req.body;
+    if (!spreadsheetId) {
+      return res.status(400).json({ error: 'Spreadsheet ID is required' });
+    }
+
+    process.env.SPREADSHEET_ID = spreadsheetId;
+    res.json({ success: true, newSpreadsheetId: process.env.SPREADSHEET_ID });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update spreadsheet ID' });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

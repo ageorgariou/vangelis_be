@@ -108,7 +108,7 @@ async function initializeAssistant() {
         instructions: config.systemPrompt,
         model: "gpt-4-turbo-preview",
         tools: [{ type: "retrieval" }],
-        file_ids: config.knowledgeBase.fileIds
+        file_id: config.knowledgeBase.fileIds[0]
       });
     } else {
       assistant = await openai.beta.assistants.create({
@@ -116,7 +116,7 @@ async function initializeAssistant() {
         instructions: config.systemPrompt,
         model: "gpt-4-turbo-preview",
         tools: [{ type: "retrieval" }],
-        file_ids: config.knowledgeBase.fileIds
+        file_id: config.knowledgeBase.fileIds[0]
       });
     }
   } catch (error) {
@@ -133,7 +133,7 @@ async function updateAssistantKnowledge() {
       instructions: config.systemPrompt,
       model: "gpt-4-turbo-preview",
       tools: [{ type: "retrieval" }],
-      file_ids: config.knowledgeBase.fileIds
+      file_id: config.knowledgeBase.fileIds[0]
     });
   } catch (error) {
     console.error("Error updating assistant knowledge:", error);

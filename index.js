@@ -107,7 +107,7 @@ async function initializeAssistant() {
       await openai.beta.assistants.update(assistant.id, {
         instructions: config.systemPrompt,
         model: "gpt-4-turbo-preview",
-        tools: [{ type: "retrieval" }],
+        tools: [{ type: "file_search" }],
         file_id: config.knowledgeBase.fileIds[0]
       });
     } else {
@@ -115,7 +115,7 @@ async function initializeAssistant() {
         name: "Vangelis Assistant",
         instructions: config.systemPrompt,
         model: "gpt-4-turbo-preview",
-        tools: [{ type: "retrieval" }],
+        tools: [{ type: "file_search" }],
         file_id: config.knowledgeBase.fileIds[0]
       });
     }
@@ -132,7 +132,7 @@ async function updateAssistantKnowledge() {
     await openai.beta.assistants.update(assistant.id, {
       instructions: config.systemPrompt,
       model: "gpt-4-turbo-preview",
-      tools: [{ type: "retrieval" }],
+      tools: [{ type: "file_search" }],
       file_id: config.knowledgeBase.fileIds[0]
     });
   } catch (error) {

@@ -4,7 +4,8 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const { OpenAI } = require('openai');
 const { google } = require('googleapis');
-
+const mammoth = require('mammoth');
+const multer = require('multer');
 
 const app = express();
 app.use(bodyParser.json());
@@ -39,6 +40,9 @@ const sheets = google.sheets({ version: 'v4', auth });
 
 // Conversation state management
 const conversations = {};
+
+// Set up multer for file uploads
+const upload = multer({ storage: multer.memoryStorage() });
 
 // Helper functions
 async function detectInterest(conversationHistory) {
@@ -244,6 +248,36 @@ app.post('/update-spreadsheet-id', (req, res) => {
     res.json({ success: true, newSpreadsheetId: process.env.SPREADSHEET_ID });
   } catch (error) {
     res.status(500).json({ error: 'Failed to update spreadsheet ID' });
+  }
+});
+
+app.post('/add-docx', upload.single('document'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No document provided' });
+    }
+
+    // Convert the DOCX to text
+    const result = await mammoth.extractRawText({
+      buffer: req.file.buffer
+    });
+
+    // Get the text content
+    const textContent = result.value;
+
+    // Append the document content to the system prompt
+    // We'll truncate it to avoid extremely long prompts
+    const truncatedContent = textContent.slice(0, 2000); // Adjust size as needed
+    config.systemPrompt += ` Additional knowledge from document: ${truncatedContent}`;
+
+    res.json({ 
+      success: true, 
+      newPrompt: config.systemPrompt,
+      message: 'Document content added to knowledge base'
+    });
+  } catch (error) {
+    console.error('Error processing document:', error);
+    res.status(500).json({ error: 'Failed to process document' });
   }
 });
 

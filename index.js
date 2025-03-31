@@ -17,16 +17,22 @@ app.use(cors({
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Configuration system
+// Enhanced configuration system
 let config = {
   systemPrompt: "You are a helpful assistant. Be friendly and keep responses concise.",
   interestSettings: {
-    easiness: 1, // Range: 0-1 (higher = easier to trigger interest)
+    easiness: 1,
     criteria: [
       "Mentioning contact information",
       "Asking about updates or notifications",
       "Expressing interest in products/services"
     ]
+  },
+  knowledgeBase: {
+    fileIds: [],
+    urls: [],
+    maxTokens: 4000,
+    temperature: 0.7
   }
 };
 
@@ -43,6 +49,71 @@ const conversations = {};
 
 // Set up multer for file uploads
 const upload = multer({ storage: multer.memoryStorage() });
+
+// Assistant management
+let assistant = null;
+
+async function uploadFileToOpenAI(fileBuffer, fileName) {
+  try {
+    const file = await openai.files.create({
+      file: fileBuffer,
+      purpose: "assistants"
+    });
+    return file.id;
+  } catch (error) {
+    console.error("Error uploading file to OpenAI:", error);
+    throw error;
+  }
+}
+
+async function initializeAssistant() {
+  try {
+    // Create or retrieve assistant
+    const assistants = await openai.beta.assistants.list();
+    const existingAssistant = assistants.data.find(a => a.name === "Vangelis Assistant");
+    
+    if (existingAssistant) {
+      assistant = existingAssistant;
+      // Update assistant with current knowledge
+      await openai.beta.assistants.update(assistant.id, {
+        instructions: config.systemPrompt,
+        model: "gpt-4-turbo-preview",
+        tools: [{ type: "retrieval" }],
+        file_ids: config.knowledgeBase.fileIds
+      });
+    } else {
+      assistant = await openai.beta.assistants.create({
+        name: "Vangelis Assistant",
+        instructions: config.systemPrompt,
+        model: "gpt-4-turbo-preview",
+        tools: [{ type: "retrieval" }],
+        file_ids: config.knowledgeBase.fileIds
+      });
+    }
+  } catch (error) {
+    console.error("Error initializing assistant:", error);
+    throw error;
+  }
+}
+
+async function updateAssistantKnowledge() {
+  if (!assistant) return;
+  
+  try {
+    await openai.beta.assistants.update(assistant.id, {
+      instructions: config.systemPrompt,
+      model: "gpt-4-turbo-preview",
+      tools: [{ type: "retrieval" }],
+      file_ids: config.knowledgeBase.fileIds
+    });
+  } catch (error) {
+    console.error("Error updating assistant knowledge:", error);
+    throw error;
+  }
+}
+
+// Initialize assistant on startup
+initializeAssistant();
 
 // Helper functions
 async function detectInterest(conversationHistory) {
@@ -115,7 +186,8 @@ app.post('/chat', async (req, res) => {
       history: [],
       collectedInfo: { name: null, email: null, phone: null },
       currentField: null,
-      fieldOrder: ['name', 'email', 'phone']
+      fieldOrder: ['name', 'email', 'phone'],
+      threadId: null
     };
   }
 
@@ -147,35 +219,39 @@ app.post('/chat', async (req, res) => {
         return res.json({ response: 'Thank you! Your information has been saved. How else can I help?' });
       }
     } else {
-      // Analyze last 3 exchanges (6 messages)
-      const historyForAnalysis = session.history
-        .filter(m => m.role === 'user' || m.role === 'assistant')
-        .slice(-6);
-
-      const isInterested = await detectInterest(historyForAnalysis);
-      
-      if (isInterested === 'yes') {
-        session.currentField = session.fieldOrder.find(f => !session.collectedInfo[f]);
-        const response = session.currentField ? 
-          `Great! Let's get your contact info. ${session.currentField === 'name' ? 
-            'May I have your full name?' : 
-            'What email address should we use?'}` :
-          'We already have your info. How can I help?';
-        
-        session.history.push({ role: 'assistant', content: response });
-        return res.json({ response });
+      // Create or retrieve thread
+      if (!session.threadId) {
+        const thread = await openai.beta.threads.create();
+        session.threadId = thread.id;
       }
 
-      // Generate normal response
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [{
-          role: 'system',
-          content: config.systemPrompt
-        }, ...session.history]
+      // Add message to thread
+      await openai.beta.threads.messages.create(session.threadId, {
+        role: "user",
+        content: message
       });
 
-      const response = completion.choices[0].message.content;
+      // Run the assistant
+      const run = await openai.beta.threads.runs.create(session.threadId, {
+        assistant_id: assistant.id
+      });
+
+      // Wait for the run to complete
+      let runStatus = await openai.beta.threads.runs.retrieve(session.threadId, run.id);
+      while (runStatus.status === 'in_progress' || runStatus.status === 'queued') {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        runStatus = await openai.beta.threads.runs.retrieve(session.threadId, run.id);
+      }
+
+      if (runStatus.status === 'failed') {
+        throw new Error('Assistant run failed');
+      }
+
+      // Get the assistant's response
+      const messages = await openai.beta.threads.messages.list(session.threadId);
+      const lastMessage = messages.data[0];
+      const response = lastMessage.content[0].text.value;
+
       session.history.push({ role: 'assistant', content: response });
       return res.json({ response });
     }
@@ -219,17 +295,23 @@ app.post('/update-prompt', (req, res) => {
   }
 });
 
-app.post('/add-urls', (req, res) => {
+app.post('/add-urls', async (req, res) => {
   try {
     const { urls } = req.body;
     if (!Array.isArray(urls) || urls.length === 0) {
       return res.status(400).json({ error: 'An array of URLs is required' });
     }
 
-    // Append each URL to the system prompt
+    // Add URLs to knowledge base
+    config.knowledgeBase.urls.push(...urls);
+
+    // Update system prompt with URLs
     urls.forEach(url => {
       config.systemPrompt += ` Go through this URL for reference and knowledge base: ${url}`;
     });
+
+    // Update assistant knowledge
+    await updateAssistantKnowledge();
 
     res.json({ success: true, newPrompt: config.systemPrompt });
   } catch (error) {
@@ -257,27 +339,43 @@ app.post('/add-docx', upload.single('document'), async (req, res) => {
       return res.status(400).json({ error: 'No document provided' });
     }
 
-    // Convert the DOCX to text
-    const result = await mammoth.extractRawText({
-      buffer: req.file.buffer
-    });
+    // Upload file to OpenAI
+    const fileId = await uploadFileToOpenAI(req.file.buffer, req.file.originalname);
+    
+    // Add file ID to knowledge base
+    config.knowledgeBase.fileIds.push(fileId);
 
-    // Get the text content
-    const textContent = result.value;
-
-    // Append the document content to the system prompt
-    // We'll truncate it to avoid extremely long prompts
-    const truncatedContent = textContent.slice(0, 2000); // Adjust size as needed
-    config.systemPrompt += ` Additional knowledge from document: ${truncatedContent}`;
+    // Update assistant knowledge
+    await updateAssistantKnowledge();
 
     res.json({ 
       success: true, 
-      newPrompt: config.systemPrompt,
-      message: 'Document content added to knowledge base'
+      message: 'Document added to knowledge base',
+      fileId: fileId
     });
   } catch (error) {
     console.error('Error processing document:', error);
     res.status(500).json({ error: 'Failed to process document' });
+  }
+});
+
+app.post('/remove-knowledge', async (req, res) => {
+  try {
+    // Reset the system prompt and knowledge base
+    config.systemPrompt = "You are a helpful assistant. Be friendly and keep responses concise.";
+    config.knowledgeBase.fileIds = [];
+    config.knowledgeBase.urls = [];
+    
+    // Update assistant knowledge
+    await updateAssistantKnowledge();
+    
+    res.json({ 
+      success: true, 
+      message: 'Knowledge base has been reset'
+    });
+  } catch (error) {
+    console.error('Error resetting knowledge base:', error);
+    res.status(500).json({ error: 'Failed to reset knowledge base' });
   }
 });
 

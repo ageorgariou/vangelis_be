@@ -91,12 +91,16 @@ async function uploadFileToOpenAI(fileBuffer, fileName) {
       isBuffer: Buffer.isBuffer(fileBuffer)
     });
 
-    // Create a new buffer to ensure we're sending the correct format
+    // Create a new buffer with the correct content type
     const buffer = Buffer.from(fileBuffer);
     
     const file = await openai.files.create({
       file: buffer,
-      purpose: "assistants"
+      purpose: "assistants",
+      metadata: {
+        filename: fileName,
+        contentType: 'application/pdf'
+      }
     });
     return file.id;
   } catch (error) {

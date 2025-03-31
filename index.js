@@ -8,7 +8,8 @@ const mammoth = require('mammoth');
 const multer = require('multer');
 
 const app = express();
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors({
   origin: '*', // Allow all origins
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allow specific HTTP methods
@@ -51,7 +52,7 @@ const conversations = {};
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit (OpenAI's limit is around 512MB)
+    fileSize: 50 * 1024 * 1024, // 50MB limit
   },
   fileFilter: (req, file, cb) => {
     // Accept only specific file types
@@ -426,11 +427,17 @@ app.post('/add-docx', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
     if (error.message.includes('Multer error')) {
+      if (error.message.includes('File too large')) {
+        return res.status(413).json({ 
+          error: 'File size exceeds the limit. Maximum file size is 50MB.',
+          details: error.message
+        });
+      }
       return res.status(400).json({ error: error.message });
     }
     if (error.status === 413) {
-      return res.status(400).json({ 
-        error: 'File size exceeds OpenAI\'s limit. Please upload a smaller file.',
+      return res.status(413).json({ 
+        error: 'File size exceeds the limit. Maximum file size is 50MB.',
         details: error.message
       });
     }

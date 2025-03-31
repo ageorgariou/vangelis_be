@@ -51,7 +51,7 @@ const conversations = {};
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
+    fileSize: 5 * 1024 * 1024, // 5MB limit (OpenAI's limit is around 512MB)
   },
   fileFilter: (req, file, cb) => {
     // Accept only specific file types
@@ -84,13 +84,28 @@ let assistant = null;
 
 async function uploadFileToOpenAI(fileBuffer, fileName) {
   try {
+    console.log('Attempting to upload file to OpenAI:', {
+      fileName,
+      bufferSize: fileBuffer.length,
+      bufferType: typeof fileBuffer,
+      isBuffer: Buffer.isBuffer(fileBuffer)
+    });
+
+    // Create a new buffer to ensure we're sending the correct format
+    const buffer = Buffer.from(fileBuffer);
+    
     const file = await openai.files.create({
-      file: fileBuffer,
+      file: buffer,
       purpose: "assistants"
     });
     return file.id;
   } catch (error) {
-    console.error("Error uploading file to OpenAI:", error);
+    console.error("Error uploading file to OpenAI:", {
+      error: error.message,
+      status: error.status,
+      type: error.type,
+      details: error.error
+    });
     throw error;
   }
 }
@@ -374,7 +389,9 @@ app.post('/add-docx', async (req, res) => {
     console.log('File received:', {
       filename: req.file.originalname,
       size: req.file.size,
-      mimetype: req.file.mimetype
+      mimetype: req.file.mimetype,
+      bufferSize: req.file.buffer.length,
+      isBuffer: Buffer.isBuffer(req.file.buffer)
     });
 
     // Upload file to OpenAI
@@ -393,7 +410,12 @@ app.post('/add-docx', async (req, res) => {
       fileId: fileId
     });
   } catch (error) {
-    console.error('Error processing document:', error);
+    console.error('Error processing document:', {
+      error: error.message,
+      status: error.status,
+      type: error.type,
+      details: error.error
+    });
     
     // Send appropriate error response
     if (error.message.includes('Invalid file type')) {
@@ -401,6 +423,12 @@ app.post('/add-docx', async (req, res) => {
     }
     if (error.message.includes('Multer error')) {
       return res.status(400).json({ error: error.message });
+    }
+    if (error.status === 413) {
+      return res.status(400).json({ 
+        error: 'File size exceeds OpenAI\'s limit. Please upload a smaller file.',
+        details: error.message
+      });
     }
     return res.status(500).json({ 
       error: 'Failed to process document',

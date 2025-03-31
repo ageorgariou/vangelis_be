@@ -47,8 +47,37 @@ const sheets = google.sheets({ version: 'v4', auth });
 // Conversation state management
 const conversations = {};
 
-// Set up multer for file uploads
-const upload = multer({ storage: multer.memoryStorage() });
+// Configure multer with better error handling
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept only specific file types
+    const allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only PDF and DOCX files are allowed.'));
+    }
+  }
+}).single('document');
+
+// Wrap multer in a promise for better error handling
+const uploadMiddleware = (req, res) => {
+  return new Promise((resolve, reject) => {
+    upload(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        reject(new Error(`Multer error: ${err.message}`));
+      } else if (err) {
+        reject(new Error(err.message));
+      } else {
+        resolve();
+      }
+    });
+  });
+};
 
 // Assistant management
 let assistant = null;
@@ -333,14 +362,24 @@ app.post('/update-spreadsheet-id', (req, res) => {
   }
 });
 
-app.post('/add-docx', upload.single('document'), async (req, res) => {
+app.post('/add-docx', async (req, res) => {
   try {
+    // Handle file upload with proper error handling
+    await uploadMiddleware(req, res);
+
     if (!req.file) {
       return res.status(400).json({ error: 'No document provided' });
     }
 
+    console.log('File received:', {
+      filename: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype
+    });
+
     // Upload file to OpenAI
     const fileId = await uploadFileToOpenAI(req.file.buffer, req.file.originalname);
+    console.log('File uploaded to OpenAI:', fileId);
     
     // Add file ID to knowledge base
     config.knowledgeBase.fileIds.push(fileId);
@@ -355,7 +394,18 @@ app.post('/add-docx', upload.single('document'), async (req, res) => {
     });
   } catch (error) {
     console.error('Error processing document:', error);
-    res.status(500).json({ error: 'Failed to process document' });
+    
+    // Send appropriate error response
+    if (error.message.includes('Invalid file type')) {
+      return res.status(400).json({ error: error.message });
+    }
+    if (error.message.includes('Multer error')) {
+      return res.status(400).json({ error: error.message });
+    }
+    return res.status(500).json({ 
+      error: 'Failed to process document',
+      details: error.message
+    });
   }
 });
 

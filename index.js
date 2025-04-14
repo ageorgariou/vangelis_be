@@ -278,10 +278,36 @@ async function saveToSheet(session) {
 }
 
 // Create WebSocket server
-const wss = new WebSocket.Server({ port: 3034 });
+const server = require('http').createServer(app);
+const wss = new WebSocket.Server({ 
+  server,
+  path: '/ws',
+  clientTracking: true,
+  perMessageDeflate: true
+});
+
+// Add CORS headers for WebSocket connections
+wss.on('headers', (headers) => {
+  headers.push('Access-Control-Allow-Origin: *');
+  headers.push('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+  headers.push('Access-Control-Allow-Headers: Content-Type, Authorization');
+});
+
+// Add error handling for WebSocket server
+wss.on('error', (error) => {
+  console.error('WebSocket server error:', error);
+});
 
 wss.on('connection', (ws) => {
   console.log('New WebSocket connection established');
+
+  ws.on('error', (error) => {
+    console.error('WebSocket connection error:', error);
+  });
+
+  ws.on('close', () => {
+    console.log('Client disconnected');
+  });
 
   ws.on('message', async (message) => {
     try {
@@ -497,4 +523,4 @@ app.post('/remove-knowledge', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

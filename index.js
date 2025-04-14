@@ -6,6 +6,7 @@ const { OpenAI } = require('openai');
 const { google } = require('googleapis');
 const mammoth = require('mammoth');
 const multer = require('multer');
+const WebSocket = require('ws');
 
 const app = express();
 app.use(bodyParser.json({ limit: '50mb' }));
@@ -225,89 +226,61 @@ async function saveToSheet(session) {
   });
 }
 
-// Routes
-app.post('/chat', async (req, res) => {
-  const { message, sessionId } = req.body;
+// Create WebSocket server
+const wss = new WebSocket.Server({ port: 3034 });
 
-  // Initialize session
-  if (!conversations[sessionId]) {
-    conversations[sessionId] = {
-      history: [],
-      collectedInfo: { name: null, email: null, phone: null },
-      currentField: null,
-      fieldOrder: ['name', 'email', 'phone'],
-      threadId: null
-    };
-  }
+wss.on('connection', (ws) => {
+  console.log('New WebSocket connection established');
 
-  const session = conversations[sessionId];
-  session.history.push({ role: 'user', content: message });
-
-  try {
-    if (session.currentField) {
-      const value = await extractField(message, session.currentField);
+  ws.on('message', async (message) => {
+    try {
+      const { sessionId, content } = JSON.parse(message);
       
-      if (value) {
-        session.collectedInfo[session.currentField] = value;
-        session.history.push({ role: 'assistant', content: `Got your ${session.currentField}!` });
-      }
-
-      const nextField = session.fieldOrder.find(f => !session.collectedInfo[f]);
-      
-      if (nextField) {
-        session.currentField = nextField;
-        const prompts = {
-          name: 'May I have your full name?',
-          email: 'What email address should we use?',
-          phone: 'Finally, could you share your phone number?'
+      // Initialize session if needed
+      if (!conversations[sessionId]) {
+        conversations[sessionId] = {
+          history: [],
+          collectedInfo: { name: null, email: null, phone: null },
+          currentField: null,
+          fieldOrder: ['name', 'email', 'phone'],
+          threadId: null
         };
-        return res.json({ response: prompts[nextField] });
-      } else {
-        await saveToSheet(session);
-        session.currentField = null;
-        return res.json({ response: 'Thank you! Your information has been saved. How else can I help?' });
-      }
-    } else {
-      // Create or retrieve thread
-      if (!session.threadId) {
-        const thread = await openai.beta.threads.create();
-        session.threadId = thread.id;
       }
 
-      // Add message to thread
-      await openai.beta.threads.messages.create(session.threadId, {
-        role: "user",
-        content: message
+      const session = conversations[sessionId];
+      session.history.push({ role: 'user', content });
+
+      // Create streaming response
+      const stream = await openai.chat.completions.create({
+        model: "gpt-4-turbo-preview",
+        messages: session.history,
+        stream: true,
       });
 
-      // Run the assistant
-      const run = await openai.beta.threads.runs.create(session.threadId, {
-        assistant_id: assistant.id
-      });
-
-      // Wait for the run to complete
-      let runStatus = await openai.beta.threads.runs.retrieve(session.threadId, run.id);
-      while (runStatus.status === 'in_progress' || runStatus.status === 'queued') {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        runStatus = await openai.beta.threads.runs.retrieve(session.threadId, run.id);
+      // Stream the response back to the client
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content || '';
+        if (content) {
+          ws.send(JSON.stringify({ type: 'chunk', content }));
+        }
       }
 
-      if (runStatus.status === 'failed') {
-        throw new Error('Assistant run failed');
-      }
+      // Send completion message
+      ws.send(JSON.stringify({ type: 'complete' }));
 
-      // Get the assistant's response
-      const messages = await openai.beta.threads.messages.list(session.threadId);
-      const lastMessage = messages.data[0];
-      const response = lastMessage.content[0].text.value;
-
-      session.history.push({ role: 'assistant', content: response });
-      return res.json({ response });
+    } catch (error) {
+      console.error('WebSocket error:', error);
+      ws.send(JSON.stringify({ type: 'error', message: 'An error occurred' }));
     }
-  } catch (error) {
-    console.error('Error:', error);
-    return res.status(500).json({ error: error.message });
-  }
+  });
+});
+
+// Routes
+app.post('/chat', (req, res) => {
+  res.json({ 
+    message: 'Please use WebSocket connection for real-time chat',
+    wsUrl: 'ws://localhost:3034'
+  });
 });
 
 app.post('/update-config', (req, res) => {

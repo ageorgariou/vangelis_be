@@ -334,7 +334,7 @@ wss.on('connection', (ws) => {
 app.post('/chat', (req, res) => {
   res.json({ 
     message: 'Please use WebSocket connection for real-time chat',
-    wsUrl: 'ws://localhost:3034'
+    wsUrl: 'wss://vangelis-be-b551180564a5.herokuapp.com'
   });
 });
 

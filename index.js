@@ -303,22 +303,97 @@ const MAX_HISTORY_LENGTH = 10; // Keep only last 10 messages
 const TIMEOUT_MS = 30000; // 30 seconds timeout for API calls
 const SESSION_TIMEOUT_MS = 3600000; // 1 hour session timeout
 const MAX_CONCURRENT_REQUESTS = 5; // Maximum concurrent requests per session
+const RECONNECT_TIMEOUT_MS = 5000; // 5 seconds between reconnection attempts
+const MAX_RECONNECT_ATTEMPTS = 3; // Maximum number of reconnection attempts
 
-wss.on('connection', (ws) => {
+// Store active connections and their states
+const activeConnections = new Map();
+
+wss.on('connection', (ws, req) => {
   console.log('New WebSocket connection established');
   let isProcessing = false;
+  let sessionId = null;
+  let reconnectAttempts = 0;
+
+  // Function to handle reconnection
+  const handleReconnection = async () => {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.log(`Max reconnection attempts reached for session ${sessionId}`);
+      return;
+    }
+
+    reconnectAttempts++;
+    console.log(`Attempting reconnection ${reconnectAttempts} for session ${sessionId}`);
+
+    try {
+      // Check if session exists
+      if (sessionId && conversations[sessionId]) {
+        // Send reconnection success message
+        ws.send(JSON.stringify({
+          type: 'reconnect',
+          success: true,
+          sessionId: sessionId,
+          history: conversations[sessionId].history
+        }));
+        console.log(`Successfully reconnected session ${sessionId}`);
+      } else {
+        // Create new session if needed
+        sessionId = generateSessionId();
+        conversations[sessionId] = {
+          history: [
+            { role: 'system', content: config.systemPrompt }
+          ],
+          collectedInfo: { name: null, email: null, phone: null },
+          currentField: null,
+          fieldOrder: ['name', 'email', 'phone'],
+          threadId: null,
+          requestCount: 0,
+          lastActivity: Date.now()
+        };
+        ws.send(JSON.stringify({
+          type: 'new_session',
+          sessionId: sessionId
+        }));
+      }
+    } catch (error) {
+      console.error('Reconnection error:', error);
+      setTimeout(handleReconnection, RECONNECT_TIMEOUT_MS);
+    }
+  };
+
+  // Generate unique session ID
+  const generateSessionId = () => {
+    return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  };
 
   ws.on('error', (error) => {
     console.error('WebSocket connection error:', error);
+    if (sessionId) {
+      activeConnections.delete(sessionId);
+    }
     ws.close();
   });
 
   ws.on('close', () => {
     console.log('Client disconnected');
+    if (sessionId) {
+      activeConnections.delete(sessionId);
+      // Attempt reconnection
+      setTimeout(handleReconnection, RECONNECT_TIMEOUT_MS);
+    }
   });
 
   ws.on('message', async (message) => {
     try {
+      const data = JSON.parse(message);
+      
+      // Handle reconnection request
+      if (data.type === 'reconnect' && data.sessionId) {
+        sessionId = data.sessionId;
+        await handleReconnection();
+        return;
+      }
+
       // Prevent concurrent processing
       if (isProcessing) {
         ws.send(JSON.stringify({ 
@@ -329,7 +404,11 @@ wss.on('connection', (ws) => {
       }
 
       isProcessing = true;
-      const { sessionId, content } = JSON.parse(message);
+      sessionId = data.sessionId || generateSessionId();
+      const content = data.content;
+      
+      // Store connection
+      activeConnections.set(sessionId, ws);
       
       // Initialize session if needed
       if (!conversations[sessionId]) {
@@ -350,6 +429,7 @@ wss.on('connection', (ws) => {
           if (conversations[sessionId]) {
             console.log(`Cleaning up expired session: ${sessionId}`);
             delete conversations[sessionId];
+            activeConnections.delete(sessionId);
           }
         }, SESSION_TIMEOUT_MS);
       }

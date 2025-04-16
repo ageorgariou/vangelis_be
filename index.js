@@ -467,8 +467,7 @@ wss.on('connection', (ws, req) => {
           model: "gpt-4-turbo-preview",
           messages: session.history,
           stream: true,
-          temperature: config.knowledgeBase.temperature,
-          max_tokens: config.knowledgeBase.maxTokens
+          temperature: config.knowledgeBase.temperature
         });
 
         // Stream the response back to the client

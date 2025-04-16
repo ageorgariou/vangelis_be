@@ -298,11 +298,19 @@ wss.on('error', (error) => {
   console.error('WebSocket server error:', error);
 });
 
+// Constants for configuration
+const MAX_HISTORY_LENGTH = 10; // Keep only last 10 messages
+const TIMEOUT_MS = 30000; // 30 seconds timeout for API calls
+const SESSION_TIMEOUT_MS = 3600000; // 1 hour session timeout
+const MAX_CONCURRENT_REQUESTS = 5; // Maximum concurrent requests per session
+
 wss.on('connection', (ws) => {
   console.log('New WebSocket connection established');
+  let isProcessing = false;
 
   ws.on('error', (error) => {
     console.error('WebSocket connection error:', error);
+    ws.close();
   });
 
   ws.on('close', () => {
@@ -311,6 +319,16 @@ wss.on('connection', (ws) => {
 
   ws.on('message', async (message) => {
     try {
+      // Prevent concurrent processing
+      if (isProcessing) {
+        ws.send(JSON.stringify({ 
+          type: 'error', 
+          message: 'Please wait for the previous message to complete' 
+        }));
+        return;
+      }
+
+      isProcessing = true;
       const { sessionId, content } = JSON.parse(message);
       
       // Initialize session if needed
@@ -322,36 +340,86 @@ wss.on('connection', (ws) => {
           collectedInfo: { name: null, email: null, phone: null },
           currentField: null,
           fieldOrder: ['name', 'email', 'phone'],
-          threadId: null
+          threadId: null,
+          requestCount: 0,
+          lastActivity: Date.now()
         };
+
+        // Set up session timeout
+        setTimeout(() => {
+          if (conversations[sessionId]) {
+            console.log(`Cleaning up expired session: ${sessionId}`);
+            delete conversations[sessionId];
+          }
+        }, SESSION_TIMEOUT_MS);
       }
 
       const session = conversations[sessionId];
+      
+      // Update last activity
+      session.lastActivity = Date.now();
+      
+      // Check request limit
+      if (session.requestCount >= MAX_CONCURRENT_REQUESTS) {
+        throw new Error('Too many requests. Please wait before sending more messages.');
+      }
+      
+      session.requestCount++;
+
+      // Limit history length
       session.history.push({ role: 'user', content });
-
-      // Create streaming response
-      const stream = await openai.chat.completions.create({
-        model: "gpt-4-turbo-preview",
-        messages: session.history,
-        stream: true,
-        temperature: config.knowledgeBase.temperature,
-        max_tokens: config.knowledgeBase.maxTokens
-      });
-
-      // Stream the response back to the client
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || '';
-        if (content) {
-          ws.send(JSON.stringify({ type: 'chunk', content }));
-        }
+      if (session.history.length > MAX_HISTORY_LENGTH) {
+        session.history = [
+          session.history[0], // Keep system prompt
+          ...session.history.slice(-(MAX_HISTORY_LENGTH - 1))
+        ];
       }
 
-      // Send completion message
-      ws.send(JSON.stringify({ type: 'complete' }));
+      // Set up timeout for the API call
+      const timeout = setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'error', message: 'Request timed out' }));
+        ws.close();
+      }, TIMEOUT_MS);
+
+      try {
+        // Create streaming response
+        const stream = await openai.chat.completions.create({
+          model: "gpt-4-turbo-preview",
+          messages: session.history,
+          stream: true,
+          temperature: config.knowledgeBase.temperature,
+          max_tokens: config.knowledgeBase.maxTokens
+        });
+
+        // Stream the response back to the client
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content || '';
+          if (content) {
+            ws.send(JSON.stringify({ type: 'chunk', content }));
+          }
+        }
+
+        // Send completion message
+        ws.send(JSON.stringify({ type: 'complete' }));
+      } catch (error) {
+        console.error('Error in API call:', error);
+        ws.send(JSON.stringify({ 
+          type: 'error', 
+          message: 'Error processing your request. Please try again.' 
+        }));
+      } finally {
+        clearTimeout(timeout);
+        session.requestCount--;
+        isProcessing = false;
+      }
 
     } catch (error) {
-      console.error('WebSocket error:', error);
-      ws.send(JSON.stringify({ type: 'error', message: 'An error occurred' }));
+      console.error('Error in message handling:', error);
+      ws.send(JSON.stringify({ 
+        type: 'error', 
+        message: error.message || 'An error occurred' 
+      }));
+      isProcessing = false;
     }
   });
 });

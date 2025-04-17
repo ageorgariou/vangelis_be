@@ -144,6 +144,10 @@ const wss = new WebSocket.Server({
   perMessageDeflate: true
 });
 
+// Add heartbeat interval constant
+const HEARTBEAT_INTERVAL = 30000; // 30 seconds
+const HEARTBEAT_TIMEOUT = 35000; // 35 seconds
+
 // Add CORS headers for WebSocket connections
 wss.on('headers', (headers) => {
   headers.push('Access-Control-Allow-Origin: *');
@@ -159,24 +163,51 @@ wss.on('error', (error) => {
 wss.on('connection', (ws, req) => {
   console.log('New WebSocket connection established');
   let isProcessing = false;
+  let heartbeatInterval;
+  let missedHeartbeats = 0;
+
+  // Set up heartbeat
+  const heartbeat = () => {
+    missedHeartbeats = 0;
+    try {
+      ws.send(JSON.stringify({ type: 'ping' }));
+    } catch (error) {
+      console.error('Error sending heartbeat:', error);
+    }
+  };
+
+  // Start heartbeat
+  heartbeatInterval = setInterval(heartbeat, HEARTBEAT_INTERVAL);
 
   // Add connection to active set
   activeConnections.add(ws);
 
   ws.on('error', (error) => {
     console.error('WebSocket connection error:', error);
+    clearInterval(heartbeatInterval);
     activeConnections.delete(ws);
     ws.close();
   });
 
   ws.on('close', () => {
     console.log('Client disconnected');
+    clearInterval(heartbeatInterval);
     activeConnections.delete(ws);
+  });
+
+  ws.on('pong', () => {
+    missedHeartbeats = 0;
   });
 
   ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message);
+      
+      // Handle pong messages
+      if (data.type === 'pong') {
+        missedHeartbeats = 0;
+        return;
+      }
       
       // Prevent concurrent processing
       if (isProcessing) {

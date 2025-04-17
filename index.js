@@ -97,9 +97,6 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: 'v4', auth });
 
-// Conversation state management
-const conversations = {};
-
 // Configure multer with better error handling
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -132,150 +129,11 @@ const uploadMiddleware = (req, res) => {
   });
 };
 
-// Assistant management
-let assistant = null;
+// Constants for configuration
+const TIMEOUT_MS = 30000; // 30 seconds timeout for API calls
 
-async function uploadFileToOpenAI(fileBuffer, fileName) {
-  try {
-    console.log('Attempting to upload file to OpenAI:', {
-      fileName,
-      bufferSize: fileBuffer.length,
-      bufferType: typeof fileBuffer,
-      isBuffer: Buffer.isBuffer(fileBuffer)
-    });
-
-    // Create a new buffer with the correct content type
-    const buffer = Buffer.from(fileBuffer);
-    
-    const file = await openai.files.create({
-      file: buffer,
-      purpose: "assistants",
-      metadata: {
-        filename: fileName,
-        contentType: 'application/pdf'
-      }
-    });
-    return file.id;
-  } catch (error) {
-    console.error("Error uploading file to OpenAI:", {
-      error: error.message,
-      status: error.status,
-      type: error.type,
-      details: error.error
-    });
-    throw error;
-  }
-}
-
-async function initializeAssistant() {
-  try {
-    // Create or retrieve assistant
-    const assistants = await openai.beta.assistants.list();
-    const existingAssistant = assistants.data.find(a => a.name === "Vangelis Assistant");
-    
-    if (existingAssistant) {
-      assistant = existingAssistant;
-      // Update assistant with current knowledge
-      await openai.beta.assistants.update(assistant.id, {
-        instructions: config.systemPrompt,
-        model: "gpt-4-turbo-preview",
-        tools: [{ type: "file_search" }],
-        file_id: config.knowledgeBase.fileIds[0]
-      });
-    } else {
-      assistant = await openai.beta.assistants.create({
-        name: "Vangelis Assistant",
-        instructions: config.systemPrompt,
-        model: "gpt-4-turbo-preview",
-        tools: [{ type: "file_search" }],
-        file_id: config.knowledgeBase.fileIds[0]
-      });
-    }
-  } catch (error) {
-    console.error("Error initializing assistant:", error);
-    throw error;
-  }
-}
-
-async function updateAssistantKnowledge() {
-  if (!assistant) return;
-  
-  try {
-    await openai.beta.assistants.update(assistant.id, {
-      instructions: config.systemPrompt,
-      model: "gpt-4-turbo-preview",
-      tools: [{ type: "file_search" }],
-      file_id: config.knowledgeBase.fileIds[0]
-    });
-  } catch (error) {
-    console.error("Error updating assistant knowledge:", error);
-    throw error;
-  }
-}
-
-// Initialize assistant on startup
-initializeAssistant();
-
-// Helper functions
-async function detectInterest(conversationHistory) {
-  const easinessLevel = config.interestSettings.easiness > 0.8 ? 'high' : 
-                       config.interestSettings.easiness > 0.5 ? 'medium' : 'low';
-  
-  const easinessDescription = {
-    high: 'Consider even vague suggestions or potential interest',
-    medium: 'Consider both direct statements and strong hints',
-    low: 'Only consider clear, direct statements'
-  }[easinessLevel];
-
-  const response = await openai.chat.completions.create({
-    model: 'gpt-3.5-turbo',
-    messages: [{
-      role: 'system',
-      content: `Analyze conversation history for interest in sharing contact info.
-      Criteria: ${config.interestSettings.criteria.join(', ')}
-      Sensitivity: ${easinessDescription} (${config.interestSettings.easiness})
-      Respond with confidence score (0-100)|yes/no (Example: "75|yes")`
-    }, ...conversationHistory]
-  });
-
-  const [score, decision] = response.choices[0].message.content.split('|');
-  const confidence = parseInt(score) / 100;
-  const threshold = 1 - config.interestSettings.easiness;
-  
-  return confidence >= threshold ? decision.toLowerCase() : 'no';
-}
-
-async function extractField(message, field) {
-  const examples = {
-    name: 'e.g., John Doe, Jane Smith',
-    email: 'e.g., user@example.com',
-    phone: 'e.g., 123-456-7890, +1 234 567 8900'
-  };
-
-  const response = await openai.chat.completions.create({
-    model: 'gpt-3.5-turbo',
-    messages: [{
-      role: 'system',
-      content: `Extract ${field} from message. Return ONLY the value or 'null'. ${examples[field]}`
-    }, { role: 'user', content: message }]
-  });
-
-  return response.choices[0].message.content.trim() === 'null' ? null : response.choices[0].message.content.trim();
-}
-
-async function saveToSheet(session) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.SPREADSHEET_ID,
-    range: 'Sheet1',
-    valueInputOption: 'RAW',
-    resource: { values: [[
-      session.collectedInfo.name,
-      session.collectedInfo.email,
-      session.collectedInfo.phone,
-      new Date().toISOString()
-    ]]}
-  });
-}
+// Store active connections
+const activeConnections = new Set();
 
 // Create WebSocket server
 const server = require('http').createServer(app);
@@ -298,102 +156,28 @@ wss.on('error', (error) => {
   console.error('WebSocket server error:', error);
 });
 
-// Constants for configuration
-const MAX_HISTORY_LENGTH = 10; // Keep only last 10 messages
-const TIMEOUT_MS = 30000; // 30 seconds timeout for API calls
-const SESSION_TIMEOUT_MS = 3600000; // 1 hour session timeout
-const MAX_CONCURRENT_REQUESTS = 5; // Maximum concurrent requests per session
-const RECONNECT_TIMEOUT_MS = 5000; // 5 seconds between reconnection attempts
-const MAX_RECONNECT_ATTEMPTS = 3; // Maximum number of reconnection attempts
-
-// Store active connections and their states
-const activeConnections = new Map();
-
 wss.on('connection', (ws, req) => {
   console.log('New WebSocket connection established');
   let isProcessing = false;
-  let sessionId = null;
-  let reconnectAttempts = 0;
 
-  // Function to handle reconnection
-  const handleReconnection = async () => {
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      console.log(`Max reconnection attempts reached for session ${sessionId}`);
-      return;
-    }
-
-    reconnectAttempts++;
-    console.log(`Attempting reconnection ${reconnectAttempts} for session ${sessionId}`);
-
-    try {
-      // Check if session exists
-      if (sessionId && conversations[sessionId]) {
-        // Send reconnection success message
-        ws.send(JSON.stringify({
-          type: 'reconnect',
-          success: true,
-          sessionId: sessionId,
-          history: conversations[sessionId].history
-        }));
-        console.log(`Successfully reconnected session ${sessionId}`);
-      } else {
-        // Create new session if needed
-        sessionId = generateSessionId();
-        conversations[sessionId] = {
-          history: [
-            { role: 'system', content: config.systemPrompt }
-          ],
-          collectedInfo: { name: null, email: null, phone: null },
-          currentField: null,
-          fieldOrder: ['name', 'email', 'phone'],
-          threadId: null,
-          requestCount: 0,
-          lastActivity: Date.now()
-        };
-        ws.send(JSON.stringify({
-          type: 'new_session',
-          sessionId: sessionId
-        }));
-      }
-    } catch (error) {
-      console.error('Reconnection error:', error);
-      setTimeout(handleReconnection, RECONNECT_TIMEOUT_MS);
-    }
-  };
-
-  // Generate unique session ID
-  const generateSessionId = () => {
-    return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-  };
+  // Add connection to active set
+  activeConnections.add(ws);
 
   ws.on('error', (error) => {
     console.error('WebSocket connection error:', error);
-    if (sessionId) {
-      activeConnections.delete(sessionId);
-    }
+    activeConnections.delete(ws);
     ws.close();
   });
 
   ws.on('close', () => {
     console.log('Client disconnected');
-    if (sessionId) {
-      activeConnections.delete(sessionId);
-      // Attempt reconnection
-      setTimeout(handleReconnection, RECONNECT_TIMEOUT_MS);
-    }
+    activeConnections.delete(ws);
   });
 
   ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message);
       
-      // Handle reconnection request
-      if (data.type === 'reconnect' && data.sessionId) {
-        sessionId = data.sessionId;
-        await handleReconnection();
-        return;
-      }
-
       // Prevent concurrent processing
       if (isProcessing) {
         ws.send(JSON.stringify({ 
@@ -404,56 +188,7 @@ wss.on('connection', (ws, req) => {
       }
 
       isProcessing = true;
-      sessionId = data.sessionId || generateSessionId();
       const content = data.content;
-      
-      // Store connection
-      activeConnections.set(sessionId, ws);
-      
-      // Initialize session if needed
-      if (!conversations[sessionId]) {
-        conversations[sessionId] = {
-          history: [
-            { role: 'system', content: config.systemPrompt }
-          ],
-          collectedInfo: { name: null, email: null, phone: null },
-          currentField: null,
-          fieldOrder: ['name', 'email', 'phone'],
-          threadId: null,
-          requestCount: 0,
-          lastActivity: Date.now()
-        };
-
-        // Set up session timeout
-        setTimeout(() => {
-          if (conversations[sessionId]) {
-            console.log(`Cleaning up expired session: ${sessionId}`);
-            delete conversations[sessionId];
-            activeConnections.delete(sessionId);
-          }
-        }, SESSION_TIMEOUT_MS);
-      }
-
-      const session = conversations[sessionId];
-      
-      // Update last activity
-      session.lastActivity = Date.now();
-      
-      // Check request limit
-      if (session.requestCount >= MAX_CONCURRENT_REQUESTS) {
-        throw new Error('Too many requests. Please wait before sending more messages.');
-      }
-      
-      session.requestCount++;
-
-      // Limit history length
-      session.history.push({ role: 'user', content });
-      if (session.history.length > MAX_HISTORY_LENGTH) {
-        session.history = [
-          session.history[0], // Keep system prompt
-          ...session.history.slice(-(MAX_HISTORY_LENGTH - 1))
-        ];
-      }
 
       // Set up timeout for the API call
       const timeout = setTimeout(() => {
@@ -462,10 +197,13 @@ wss.on('connection', (ws, req) => {
       }, TIMEOUT_MS);
 
       try {
-        // Create streaming response
+        // Create streaming response with just the current message
         const stream = await openai.chat.completions.create({
           model: "gpt-4-turbo-preview",
-          messages: session.history,
+          messages: [
+            { role: 'system', content: config.systemPrompt },
+            { role: 'user', content: content }
+          ],
           stream: true,
           temperature: config.knowledgeBase.temperature
         });
@@ -488,7 +226,6 @@ wss.on('connection', (ws, req) => {
         }));
       } finally {
         clearTimeout(timeout);
-        session.requestCount--;
         isProcessing = false;
       }
 

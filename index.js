@@ -148,6 +148,9 @@ const wss = new WebSocket.Server({
 const HEARTBEAT_INTERVAL = 30000; // 30 seconds
 const HEARTBEAT_TIMEOUT = 35000; // 35 seconds
 
+// Add session management
+const sessions = new Map(); // Store sessions by sessionId
+
 // Add CORS headers for WebSocket connections
 wss.on('headers', (headers) => {
   headers.push('Access-Control-Allow-Origin: *');
@@ -165,6 +168,16 @@ wss.on('connection', (ws, req) => {
   let isProcessing = false;
   let heartbeatInterval;
   let missedHeartbeats = 0;
+  let sessionId = req.headers['sec-websocket-key'] || Date.now().toString();
+  let chatHistory = [];
+
+  // Initialize or restore session
+  if (sessions.has(sessionId)) {
+    chatHistory = sessions.get(sessionId).chatHistory;
+    console.log('Restored session with history length:', chatHistory.length);
+  } else {
+    sessions.set(sessionId, { chatHistory: [], lastActive: Date.now() });
+  }
 
   // Set up heartbeat
   const heartbeat = () => {
@@ -193,6 +206,15 @@ wss.on('connection', (ws, req) => {
     console.log('Client disconnected');
     clearInterval(heartbeatInterval);
     activeConnections.delete(ws);
+    
+    // Keep session for 1 hour after last activity
+    setTimeout(() => {
+      if (sessions.has(sessionId) && 
+          Date.now() - sessions.get(sessionId).lastActive > 3600000) {
+        sessions.delete(sessionId);
+        console.log('Session expired and removed:', sessionId);
+      }
+    }, 3600000);
   });
 
   ws.on('pong', () => {
@@ -221,6 +243,11 @@ wss.on('connection', (ws, req) => {
       isProcessing = true;
       const content = data.content;
 
+      // Add user message to chat history
+      chatHistory.push({ role: 'user', content });
+      sessions.get(sessionId).chatHistory = chatHistory;
+      sessions.get(sessionId).lastActive = Date.now();
+
       // Set up timeout for the API call
       const timeout = setTimeout(() => {
         ws.send(JSON.stringify({ type: 'error', message: 'Request timed out' }));
@@ -228,45 +255,50 @@ wss.on('connection', (ws, req) => {
       }, TIMEOUT_MS);
 
       try {
-        // Create streaming response with just the current message
+        // Create streaming response with full chat history
         const stream = await openai.chat.completions.create({
           model: "gpt-4-turbo-preview",
           messages: [
             { role: 'system', content: config.systemPrompt },
-            { role: 'user', content: content }
+            ...chatHistory
           ],
           stream: true,
           temperature: config.knowledgeBase.temperature
         });
 
+        let fullResponse = '';
         // Stream the response back to the client
         for await (const chunk of stream) {
           const content = chunk.choices[0]?.delta?.content || '';
           if (content) {
+            fullResponse += content;
             ws.send(JSON.stringify({ type: 'chunk', content }));
           }
         }
 
+        // Add assistant response to chat history
+        chatHistory.push({ role: 'assistant', content: fullResponse });
+        sessions.get(sessionId).chatHistory = chatHistory;
+        sessions.get(sessionId).lastActive = Date.now();
+
         // Send completion message
-        ws.send(JSON.stringify({ type: 'complete' }));
+        ws.send(JSON.stringify({ type: 'complete', content: fullResponse }));
       } catch (error) {
-        console.error('Error in API call:', error);
+        console.error('Error processing message:', error);
         ws.send(JSON.stringify({ 
           type: 'error', 
-          message: 'Error processing your request. Please try again.' 
+          message: 'An error occurred while processing your message' 
         }));
       } finally {
         clearTimeout(timeout);
         isProcessing = false;
       }
-
     } catch (error) {
-      console.error('Error in message handling:', error);
+      console.error('Error parsing message:', error);
       ws.send(JSON.stringify({ 
         type: 'error', 
-        message: error.message || 'An error occurred' 
+        message: 'Invalid message format' 
       }));
-      isProcessing = false;
     }
   });
 });

@@ -369,15 +369,87 @@ app.post('/add-urls', async (req, res) => {
   }
 });
 
-app.post('/update-spreadsheet-id', (req, res) => {
+// Add function to read from Google Sheets
+async function readFromGoogleSheets(spreadsheetId) {
+  try {
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: spreadsheetId,
+      range: 'A:Z', // Read all columns
+    });
+
+    const rows = response.data.values;
+    if (!rows || rows.length === 0) {
+      console.log('No data found in spreadsheet');
+      return '';
+    }
+
+    // Convert spreadsheet data to a formatted string
+    let spreadsheetContent = '\nKNOWLEDGE FROM SPREADSHEET:\n';
+    rows.forEach((row, index) => {
+      if (index === 0) {
+        // Add headers
+        spreadsheetContent += 'HEADERS: ' + row.join(' | ') + '\n';
+      } else {
+        // Add data rows
+        spreadsheetContent += row.join(' | ') + '\n';
+      }
+    });
+
+    return spreadsheetContent;
+  } catch (error) {
+    console.error('Error reading from Google Sheets:', error);
+    return '';
+  }
+}
+
+// Update the updateAssistantKnowledge function
+async function updateAssistantKnowledge(spreadsheetId) {
+  try {
+    // Read from Google Sheets
+    const spreadsheetContent = await readFromGoogleSheets(spreadsheetId);
+    
+    // Update system prompt with spreadsheet content
+    if (spreadsheetContent) {
+      config.systemPrompt += spreadsheetContent;
+    }
+    
+    console.log('Updated system prompt:', config.systemPrompt);
+    // Update with other knowledge sources (URLs and files)
+    if (config.knowledgeBase.urls.length > 0) {
+      config.systemPrompt += '\nKNOWLEDGE FROM URLs:\n';
+      config.knowledgeBase.urls.forEach(url => {
+        config.systemPrompt += `- ${url}\n`;
+      });
+    }
+    
+    if (config.knowledgeBase.fileIds.length > 0) {
+      config.systemPrompt += '\nKNOWLEDGE FROM UPLOADED FILES:\n';
+      config.knowledgeBase.fileIds.forEach(fileId => {
+        config.systemPrompt += `- File ID: ${fileId}\n`;
+      });
+    }
+  } catch (error) {
+    console.error('Error updating assistant knowledge:', error);
+  }
+}
+
+// Update the update-spreadsheet-id endpoint to also update knowledge
+app.post('/update-spreadsheet-id', async (req, res) => {
   try {
     const { spreadsheetId } = req.body;
     if (!spreadsheetId) {
       return res.status(400).json({ error: 'Spreadsheet ID is required' });
     }
 
-    process.env.SPREADSHEET_ID = spreadsheetId;
-    res.json({ success: true, newSpreadsheetId: process.env.SPREADSHEET_ID });
+
+    // Update assistant knowledge with new spreadsheet data
+    await updateAssistantKnowledge(spreadsheetId);
+    
+    res.json({ 
+      success: true, 
+      newSpreadsheetId: spreadsheetId,
+      message: 'Spreadsheet ID updated and knowledge base refreshed'
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to update spreadsheet ID' });
   }

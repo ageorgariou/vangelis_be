@@ -474,7 +474,7 @@ app.post('/add-docx', async (req, res) => {
 
     // Upload file to OpenAI
     const fileId = await uploadFileToOpenAI(req.file.buffer, req.file.originalname);
-    console.log('File uploaded to OpenAI:', fileId);
+    console.log('File uploaded to OpenAI: ', fileId);
     
     // Add file ID to knowledge base
     config.knowledgeBase.fileIds.push(fileId);

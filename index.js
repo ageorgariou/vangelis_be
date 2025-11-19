@@ -450,7 +450,7 @@ app.get('/test-ws', (req, res) => {
 app.post('/chat', (req, res) => {
   res.json({ 
     message: 'Please use WebSocket connection for real-time chat',
-    wsUrl: 'wss://43b1f87ad2af.ngrok-free.app/ws'
+    wsUrl: 'wss://gruppocb-f23c19cea41a.herokuapp.com/ws'
   });
 });
 

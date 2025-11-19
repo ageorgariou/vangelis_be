@@ -9,13 +9,30 @@ const multer = require('multer');
 const WebSocket = require('ws');
 
 const app = express();
+
+// Add request logging middleware FIRST to see all incoming requests
+app.use((req, res, next) => {
+  console.log(`\n📥 Incoming ${req.method} request:`, req.url);
+  console.log('  Origin:', req.headers.origin || 'none');
+  console.log('  User-Agent:', req.headers['user-agent']?.substring(0, 50) || 'none');
+  next();
+});
+
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
+
+// Enhanced CORS configuration
 app.use(cors({
   origin: '*', // Allow all origins
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allow specific HTTP methods
-  allowedHeaders: ['Content-Type', 'Authorization'] // Allow specific headers
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  credentials: true,
+  preflightContinue: false,
+  optionsSuccessStatus: 204
 }));
+
+// Handle preflight requests explicitly
+app.options('*', cors());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -132,174 +149,300 @@ const uploadMiddleware = (req, res) => {
 // Constants for configuration
 const TIMEOUT_MS = 30000; // 30 seconds timeout for API calls
 
-// Store active connections
-const activeConnections = new Set();
+// Create HTTP server
+const server = require('http').createServer(app);
 
 // Create WebSocket server
-const server = require('http').createServer(app);
-const wss = new WebSocket.Server({ 
-  server,
-  path: '/ws',
-  clientTracking: true,
-  perMessageDeflate: true
-});
+let wss;
+try {
+  wss = new WebSocket.Server({ 
+    server,
+    path: '/ws'
+  });
+  console.log('✅ WebSocket server created successfully');
+} catch (wsError) {
+  console.error('❌ Failed to create WebSocket server:', wsError);
+  console.error('Error stack:', wsError?.stack);
+  throw wsError;
+}
 
-// Add heartbeat interval constant
-const HEARTBEAT_INTERVAL = 30000; // 30 seconds
-const HEARTBEAT_TIMEOUT = 35000; // 35 seconds
+// Session management
+const sessions = new Map(); // Store sessions by connection ID
+let connectionIdCounter = 0;
 
-// Add session management
-const sessions = new Map(); // Store sessions by sessionId
-
-// Add CORS headers for WebSocket connections
-wss.on('headers', (headers) => {
-  headers.push('Access-Control-Allow-Origin: *');
-  headers.push('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-  headers.push('Access-Control-Allow-Headers: Content-Type, Authorization');
-});
-
-// Add error handling for WebSocket server
+// WebSocket server error handling
 wss.on('error', (error) => {
-  console.error('WebSocket server error:', error);
+  console.error('\n❌ WebSocket server error:');
+  console.error('  Error:', error);
+  console.error('  Stack:', error?.stack);
 });
 
-wss.on('connection', (ws, req) => {
-  console.log('New WebSocket connection established');
-  let isProcessing = false;
-  let heartbeatInterval;
-  let missedHeartbeats = 0;
-  let sessionId = req.headers['sec-websocket-key'] || Date.now().toString();
-  let chatHistory = [];
-
-  // Initialize or restore session
-  if (sessions.has(sessionId)) {
-    chatHistory = sessions.get(sessionId).chatHistory;
-    console.log('Restored session with history length:', chatHistory.length);
-  } else {
-    sessions.set(sessionId, { chatHistory: [], lastActive: Date.now() });
+// Catch unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('\n❌ Unhandled Rejection:');
+  console.error('  Reason:', reason);
+  console.error('  Promise:', promise);
+  if (reason instanceof Error) {
+    console.error('  Stack:', reason.stack);
   }
+});
 
-  // Set up heartbeat
-  const heartbeat = () => {
-    missedHeartbeats = 0;
-    try {
-      ws.send(JSON.stringify({ type: 'ping' }));
-    } catch (error) {
-      console.error('Error sending heartbeat:', error);
-    }
-  };
+// Catch uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('\n❌ Uncaught Exception:');
+  console.error('  Error:', error);
+  console.error('  Stack:', error?.stack);
+});
 
-  // Start heartbeat
-  heartbeatInterval = setInterval(heartbeat, HEARTBEAT_INTERVAL);
-
-  // Add connection to active set
-  activeConnections.add(ws);
-
-  ws.on('error', (error) => {
-    console.error('WebSocket connection error:', error);
-    clearInterval(heartbeatInterval);
-    activeConnections.delete(ws);
-    ws.close();
-  });
-
-  ws.on('close', () => {
-    console.log('Client disconnected');
-    clearInterval(heartbeatInterval);
-    activeConnections.delete(ws);
+// WebSocket connection handling
+console.log('📡 Registering WebSocket connection handler...');
+wss.on('connection', (ws, req) => {
+  try {
+    const connectionId = `ws_${++connectionIdCounter}_${Date.now()}`;
+    console.log('\n=== NEW WEBSOCKET CONNECTION ===');
+    console.log('Timestamp:', new Date().toISOString());
+    console.log('Connection ID:', connectionId);
+    console.log('Remote address:', req.socket.remoteAddress);
+    console.log('Request headers:', JSON.stringify(req.headers || {}));
     
-    // Keep session for 1 hour after last activity
-    setTimeout(() => {
-      if (sessions.has(sessionId) && 
-          Date.now() - sessions.get(sessionId).lastActive > 3600000) {
-        sessions.delete(sessionId);
-        console.log('Session expired and removed:', sessionId);
-      }
-    }, 3600000);
-  });
+    let isProcessing = false;
+    let chatHistory = [];
+    let heartbeatInterval = null;
 
-  ws.on('pong', () => {
-    missedHeartbeats = 0;
-  });
-
-  ws.on('message', async (message) => {
+    // Initialize session
     try {
-      const data = JSON.parse(message);
-      
-      // Handle pong messages
-      if (data.type === 'pong') {
-        missedHeartbeats = 0;
-        return;
+      sessions.set(connectionId, { 
+        chatHistory: [], 
+        lastActive: Date.now(),
+        ws: ws
+      });
+      console.log('Created new session:', connectionId);
+    } catch (sessionError) {
+      console.error('Error initializing session:', sessionError);
+      console.error('Session error stack:', sessionError?.stack);
+      sessions.set(connectionId, { chatHistory: [], lastActive: Date.now(), ws: ws });
+      chatHistory = [];
+    }
+
+    console.log('Session initialized successfully');
+
+    // Start heartbeat/ping interval
+    heartbeatInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        } catch (err) {
+          console.error('Error sending ping:', err);
+        }
       }
-      
-      // Prevent concurrent processing
-      if (isProcessing) {
-        ws.send(JSON.stringify({ 
-          type: 'error', 
-          message: 'Please wait for the previous message to complete' 
-        }));
-        return;
-      }
+    }, 30000); // Send ping every 30 seconds
 
-      isProcessing = true;
-      const content = data.content;
-
-      // Add user message to chat history
-      chatHistory.push({ role: 'user', content });
-      sessions.get(sessionId).chatHistory = chatHistory;
-      sessions.get(sessionId).lastActive = Date.now();
-
-      // Set up timeout for the API call
-      const timeout = setTimeout(() => {
-        ws.send(JSON.stringify({ type: 'error', message: 'Request timed out' }));
-        ws.close();
-      }, TIMEOUT_MS);
-
+    // Handle incoming messages
+    ws.on('message', async (message) => {
+      let timeout = null;
       try {
-        // Create streaming response with full chat history
-        const stream = await openai.chat.completions.create({
-          model: "gpt-4-turbo-preview",
-          messages: [
-            { role: 'system', content: config.systemPrompt },
-            ...chatHistory
-          ],
-          stream: true,
-          temperature: config.knowledgeBase.temperature
-        });
-
-        let fullResponse = '';
-        // Stream the response back to the client
-        for await (const chunk of stream) {
-          const content = chunk.choices[0]?.delta?.content || '';
-          if (content) {
-            fullResponse += content;
-            ws.send(JSON.stringify({ type: 'chunk', content }));
-          }
+        const data = JSON.parse(message);
+        console.log('Received message:', JSON.stringify(data).substring(0, 100));
+        
+        // Handle pong responses
+        if (data.type === 'pong') {
+          sessions.get(connectionId).lastActive = Date.now();
+          return;
+        }
+        
+        // Prevent concurrent processing
+        if (isProcessing) {
+          ws.send(JSON.stringify({ 
+            type: 'error',
+            message: 'Please wait for the previous message to complete' 
+          }));
+          return;
         }
 
-        // Add assistant response to chat history
-        chatHistory.push({ role: 'assistant', content: fullResponse });
-        sessions.get(sessionId).chatHistory = chatHistory;
-        sessions.get(sessionId).lastActive = Date.now();
+        isProcessing = true;
+        
+        // Extract message content
+        const content = data.content;
+        if (!content || content.trim() === '') {
+          console.error('Empty message content');
+          throw new Error('Message content cannot be empty');
+        }
 
-        // Send completion message
-        ws.send(JSON.stringify({ type: 'complete', content: fullResponse }));
+        console.log('Processing message:', content.substring(0, 50));
+
+        // Add user message to chat history
+        chatHistory.push({ role: 'user', content });
+        sessions.get(connectionId).chatHistory = chatHistory;
+        sessions.get(connectionId).lastActive = Date.now();
+
+        // Set up timeout for the API call
+        timeout = setTimeout(() => {
+          console.error('Request timeout for session:', connectionId);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ 
+              type: 'error',
+              message: 'Request timed out' 
+            }));
+          }
+          isProcessing = false;
+        }, TIMEOUT_MS);
+
+        // Check if OpenAI API key is configured
+        if (!process.env.OPENAI_API_KEY) {
+          throw new Error('OpenAI API key is not configured');
+        }
+
+        // Validate OpenAI client
+        if (!openai) {
+          throw new Error('OpenAI client is not initialized');
+        }
+
+        try {
+          console.log('Calling OpenAI API with', chatHistory.length, 'messages');
+          console.log('System prompt length:', config.systemPrompt?.length || 0);
+          
+          // Create streaming response with full chat history
+          const stream = await openai.chat.completions.create({
+            model: "gpt-4-turbo-preview",
+            messages: [
+              { role: 'system', content: config.systemPrompt },
+              ...chatHistory
+            ],
+            stream: true,
+            temperature: config.knowledgeBase.temperature || 0.7
+          }).catch(err => {
+            console.error('OpenAI API call failed:', err);
+            console.error('Error details:', err.message, err.status, err.response?.data);
+            throw err;
+          });
+
+          let fullResponse = '';
+          // Stream the response back to the client as chunks
+          for await (const chunk of stream) {
+            const chunkContent = chunk.choices[0]?.delta?.content || '';
+            if (chunkContent) {
+              fullResponse += chunkContent;
+              // Send chunk to client
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  type: 'chunk',
+                  content: fullResponse
+                }));
+              }
+            }
+          }
+
+          console.log('OpenAI response received, length:', fullResponse.length);
+
+          // Add assistant response to chat history
+          chatHistory.push({ role: 'assistant', content: fullResponse });
+          sessions.get(connectionId).chatHistory = chatHistory;
+          sessions.get(connectionId).lastActive = Date.now();
+
+          // Send completion message
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ 
+              type: 'complete',
+              content: fullResponse 
+            }));
+          }
+          console.log('Response sent to client');
+        } catch (error) {
+          console.error('Error processing message with OpenAI:', error);
+          console.error('Error details:', error.message, error.stack);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ 
+              type: 'error',
+              message: error.message || 'An error occurred while processing your message' 
+            }));
+          }
+        } finally {
+          if (timeout) clearTimeout(timeout);
+          isProcessing = false;
+        }
       } catch (error) {
-        console.error('Error processing message:', error);
-        ws.send(JSON.stringify({ 
-          type: 'error', 
-          message: 'An error occurred while processing your message' 
-        }));
-      } finally {
-        clearTimeout(timeout);
+        console.error('Error handling message:', error);
+        console.error('Error stack:', error.stack);
+        if (timeout) clearTimeout(timeout);
         isProcessing = false;
+        try {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ 
+              type: 'error',
+              message: error.message || 'Invalid message format' 
+            }));
+          }
+        } catch (sendError) {
+          console.error('Error sending error message:', sendError);
+        }
       }
-    } catch (error) {
-      console.error('Error parsing message:', error);
-      ws.send(JSON.stringify({ 
-        type: 'error', 
-        message: 'Invalid message format' 
-      }));
+    });
+
+    // Handle connection close
+    ws.on('close', () => {
+      try {
+        console.log('Client disconnected:', connectionId);
+        
+        // Clear heartbeat interval
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+        }
+        
+        // Keep session for 1 hour after last activity
+        setTimeout(() => {
+          if (sessions.has(connectionId) && 
+              Date.now() - sessions.get(connectionId).lastActive > 3600000) {
+            sessions.delete(connectionId);
+            console.log('Session expired and removed:', connectionId);
+          }
+        }, 3600000);
+      } catch (error) {
+        console.error('Error in close handler:', error);
+      }
+    });
+
+    // Handle WebSocket errors
+    ws.on('error', (error) => {
+      console.error('WebSocket error for session', connectionId, ':', error);
+      console.error('Error stack:', error?.stack);
+    });
+    
+    console.log('All event handlers registered successfully');
+  } catch (connectionError) {
+    console.error('=== CRITICAL ERROR IN CONNECTION HANDLER ===');
+    console.error('Error:', connectionError);
+    console.error('Error message:', connectionError?.message);
+    console.error('Error stack:', connectionError?.stack);
+    
+    // Try to close gracefully
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    } catch (closeError) {
+      console.error('Error closing websocket:', closeError);
     }
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    websocket: 'enabled',
+    timestamp: new Date().toISOString(),
+    openaiConfigured: !!process.env.OPENAI_API_KEY,
+    activeConnections: sessions.size
+  });
+});
+
+// Test WebSocket endpoint
+app.get('/test-ws', (req, res) => {
+  res.json({ 
+    message: 'WebSocket server is running',
+    websocketEnabled: true,
+    path: '/ws',
+    activeConnections: sessions.size
   });
 });
 
@@ -307,7 +450,7 @@ wss.on('connection', (ws, req) => {
 app.post('/chat', (req, res) => {
   res.json({ 
     message: 'Please use WebSocket connection for real-time chat',
-    wsUrl: 'wss://vangelis-be-b551180564a5.herokuapp.com'
+    wsUrl: 'wss://43b1f87ad2af.ngrok-free.app/ws'
   });
 });
 
@@ -542,4 +685,12 @@ app.post('/remove-knowledge', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+server.listen(PORT, () => {
+  console.log(`\n✅ ============================================`);
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ WebSocket server initialized`);
+  console.log(`✅ Health check: http://localhost:${PORT}/health`);
+  console.log(`✅ WebSocket endpoint: ws://localhost:${PORT}/ws`);
+  console.log(`✅ ============================================\n`);
+});

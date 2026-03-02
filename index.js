@@ -90,13 +90,13 @@ If the user agrees to a callback, ask the following one by one and in this exact
    EN: Perfect, noted. One of our team members will call you shortly. I'm here if you need anything else.
 
 SHOWROOM LOCATIONS (only mention if asked)
-Τοποθεσία          Τηλέφωνο
-Γλυφάδα            215 215 2228
-Χαλάνδρι           215 215 2229
-Νέα Σμύρνη         215 215 2225
-Αιγάλεω            215 215 2227
-Βούλα              215 215 2230
-Αγία Παρασκευή     215 215 2226
+Τοποθεσία          Τηλέφωνο      Διεύθυνση
+Γλυφάδα            215 215 2228    Πατσιού 16
+Χαλάνδρι           215 215 2229    Πατσιού 16
+Νέα Σμύρνη         215 215 2225    Πατσιού 16
+Αιγάλεω            215 215 2227    Πατσιού 16
+Βούλα              215 215 2230    Πατσιού 16
+Αγία Παρασκευή     215 215 2226    Πατσιού 16
 
 SPECIAL CASE: PRICE REQUEST
 If the user asks for a price:
@@ -184,7 +184,7 @@ const server = require('http').createServer(app);
 // Create WebSocket server
 let wss;
 try {
-  wss = new WebSocket.Server({ 
+  wss = new WebSocket.Server({
     server,
     path: '/ws'
   });
@@ -233,15 +233,15 @@ wss.on('connection', (ws, req) => {
     console.log('Connection ID:', connectionId);
     console.log('Remote address:', req.socket.remoteAddress);
     console.log('Request headers:', JSON.stringify(req.headers || {}));
-    
+
     let isProcessing = false;
     let chatHistory = [];
     let heartbeatInterval = null;
 
     // Initialize session
     try {
-      sessions.set(connectionId, { 
-        chatHistory: [], 
+      sessions.set(connectionId, {
+        chatHistory: [],
         lastActive: Date.now(),
         ws: ws
       });
@@ -272,24 +272,24 @@ wss.on('connection', (ws, req) => {
       try {
         const data = JSON.parse(message);
         console.log('Received message:', JSON.stringify(data).substring(0, 100));
-        
+
         // Handle pong responses
         if (data.type === 'pong') {
           sessions.get(connectionId).lastActive = Date.now();
           return;
         }
-        
+
         // Prevent concurrent processing
         if (isProcessing) {
-          ws.send(JSON.stringify({ 
+          ws.send(JSON.stringify({
             type: 'error',
-            message: 'Please wait for the previous message to complete' 
+            message: 'Please wait for the previous message to complete'
           }));
           return;
         }
 
         isProcessing = true;
-        
+
         // Extract message content
         const content = data.content;
         if (!content || content.trim() === '') {
@@ -308,9 +308,9 @@ wss.on('connection', (ws, req) => {
         timeout = setTimeout(() => {
           console.error('Request timeout for session:', connectionId);
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ 
+            ws.send(JSON.stringify({
               type: 'error',
-              message: 'Request timed out' 
+              message: 'Request timed out'
             }));
           }
           isProcessing = false;
@@ -329,7 +329,7 @@ wss.on('connection', (ws, req) => {
         try {
           console.log('Calling OpenAI API with', chatHistory.length, 'messages');
           console.log('System prompt length:', config.systemPrompt?.length || 0);
-          
+
           // Create streaming response with full chat history
           const stream = await openai.chat.completions.create({
             model: "gpt-4-turbo-preview",
@@ -370,9 +370,9 @@ wss.on('connection', (ws, req) => {
 
           // Send completion message
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ 
+            ws.send(JSON.stringify({
               type: 'complete',
-              content: fullResponse 
+              content: fullResponse
             }));
           }
           console.log('Response sent to client');
@@ -380,9 +380,9 @@ wss.on('connection', (ws, req) => {
           console.error('Error processing message with OpenAI:', error);
           console.error('Error details:', error.message, error.stack);
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ 
+            ws.send(JSON.stringify({
               type: 'error',
-              message: error.message || 'An error occurred while processing your message' 
+              message: error.message || 'An error occurred while processing your message'
             }));
           }
         } finally {
@@ -396,9 +396,9 @@ wss.on('connection', (ws, req) => {
         isProcessing = false;
         try {
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ 
+            ws.send(JSON.stringify({
               type: 'error',
-              message: error.message || 'Invalid message format' 
+              message: error.message || 'Invalid message format'
             }));
           }
         } catch (sendError) {
@@ -411,16 +411,16 @@ wss.on('connection', (ws, req) => {
     ws.on('close', () => {
       try {
         console.log('Client disconnected:', connectionId);
-        
+
         // Clear heartbeat interval
         if (heartbeatInterval) {
           clearInterval(heartbeatInterval);
         }
-        
+
         // Keep session for 1 hour after last activity
         setTimeout(() => {
-          if (sessions.has(connectionId) && 
-              Date.now() - sessions.get(connectionId).lastActive > 3600000) {
+          if (sessions.has(connectionId) &&
+            Date.now() - sessions.get(connectionId).lastActive > 3600000) {
             sessions.delete(connectionId);
             console.log('Session expired and removed:', connectionId);
           }
@@ -435,14 +435,14 @@ wss.on('connection', (ws, req) => {
       console.error('WebSocket error for session', connectionId, ':', error);
       console.error('Error stack:', error?.stack);
     });
-    
+
     console.log('All event handlers registered successfully');
   } catch (connectionError) {
     console.error('=== CRITICAL ERROR IN CONNECTION HANDLER ===');
     console.error('Error:', connectionError);
     console.error('Error message:', connectionError?.message);
     console.error('Error stack:', connectionError?.stack);
-    
+
     // Try to close gracefully
     try {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -456,8 +456,8 @@ wss.on('connection', (ws, req) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     websocket: 'enabled',
     timestamp: new Date().toISOString(),
     openaiConfigured: !!process.env.OPENAI_API_KEY,
@@ -467,7 +467,7 @@ app.get('/health', (req, res) => {
 
 // Test WebSocket endpoint
 app.get('/test-ws', (req, res) => {
-  res.json({ 
+  res.json({
     message: 'WebSocket server is running',
     websocketEnabled: true,
     path: '/ws',
@@ -477,7 +477,7 @@ app.get('/test-ws', (req, res) => {
 
 // Routes
 app.post('/chat', (req, res) => {
-  res.json({ 
+  res.json({
     message: 'Please use WebSocket connection for real-time chat',
     wsUrl: 'wss://gruppocb-f23c19cea41a.herokuapp.com/ws'
   });
@@ -488,14 +488,14 @@ app.post('/update-config', (req, res) => {
     if (req.body.easiness !== undefined) {
       config.interestSettings.easiness = Math.min(1, Math.max(0, parseFloat(req.body.easiness)));
     }
-    
+
     if (req.body.criteria) {
-      config.interestSettings.criteria = Array.isArray(req.body.criteria) ? 
-        req.body.criteria : 
+      config.interestSettings.criteria = Array.isArray(req.body.criteria) ?
+        req.body.criteria :
         [req.body.criteria];
     }
 
-    res.json({ 
+    res.json({
       success: true,
       config: config.interestSettings
     });
@@ -509,7 +509,7 @@ app.post('/update-prompt', (req, res) => {
     if (!req.body.prompt) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
-    
+
     config.systemPrompt = req.body.prompt;
     res.json({ success: true, newPrompt: config.systemPrompt });
   } catch (error) {
@@ -579,12 +579,12 @@ async function updateAssistantKnowledge(spreadsheetId) {
   try {
     // Read from Google Sheets
     const spreadsheetContent = await readFromGoogleSheets(spreadsheetId);
-    
+
     // Update system prompt with spreadsheet content
     if (spreadsheetContent) {
       config.systemPrompt += spreadsheetContent;
     }
-    
+
     console.log('Updated system prompt:', config.systemPrompt);
     // Update with other knowledge sources (URLs and files)
     if (config.knowledgeBase.urls.length > 0) {
@@ -593,7 +593,7 @@ async function updateAssistantKnowledge(spreadsheetId) {
         config.systemPrompt += `- ${url}\n`;
       });
     }
-    
+
     if (config.knowledgeBase.fileIds.length > 0) {
       config.systemPrompt += '\nKNOWLEDGE FROM UPLOADED FILES:\n';
       config.knowledgeBase.fileIds.forEach(fileId => {
@@ -616,9 +616,9 @@ app.post('/update-spreadsheet-id', async (req, res) => {
 
     // Update assistant knowledge with new spreadsheet data
     await updateAssistantKnowledge(spreadsheetId);
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       newSpreadsheetId: spreadsheetId,
       message: 'Spreadsheet ID updated and knowledge base refreshed'
     });
@@ -647,15 +647,15 @@ app.post('/add-docx', async (req, res) => {
     // Upload file to OpenAI
     const fileId = await uploadFileToOpenAI(req.file.buffer, req.file.originalname);
     console.log('File uploaded to OpenAI: ', fileId);
-    
+
     // Add file ID to knowledge base
     config.knowledgeBase.fileIds.push(fileId);
 
     // Update assistant knowledge
     await updateAssistantKnowledge();
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'Document added to knowledge base',
       fileId: fileId
     });
@@ -666,14 +666,14 @@ app.post('/add-docx', async (req, res) => {
       type: error.type,
       details: error.error
     });
-    
+
     // Send appropriate error response
     if (error.message.includes('Invalid file type')) {
       return res.status(400).json({ error: error.message });
     }
     if (error.message.includes('Multer error')) {
       if (error.message.includes('File too large')) {
-        return res.status(413).json({ 
+        return res.status(413).json({
           error: 'File size exceeds the limit. Maximum file size is 50MB.',
           details: error.message
         });
@@ -681,12 +681,12 @@ app.post('/add-docx', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
     if (error.status === 413) {
-      return res.status(413).json({ 
+      return res.status(413).json({
         error: 'File size exceeds the limit. Maximum file size is 50MB.',
         details: error.message
       });
     }
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: 'Failed to process document',
       details: error.message
     });
@@ -699,12 +699,12 @@ app.post('/remove-knowledge', async (req, res) => {
     config.systemPrompt = "You are a helpful assistant. Be friendly and keep responses concise.";
     config.knowledgeBase.fileIds = [];
     config.knowledgeBase.urls = [];
-    
+
     // Update assistant knowledge
     await updateAssistantKnowledge();
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       message: 'Knowledge base has been reset'
     });
   } catch (error) {

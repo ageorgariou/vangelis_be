@@ -48,15 +48,16 @@ If the user agrees to a callback, ask the following one by one and in this exact
 ✅ Then confirm:
    GR: Τέλεια, σημειώθηκε. Ένας συνεργάτης μας θα σε καλέσει σύντομα. Είμαι εδώ αν χρειαστείς κάτι άλλο.
    EN: Perfect, noted. One of our team members will call you shortly. I'm here if you need anything else.
-
+   
 SHOWROOM LOCATIONS (only mention if asked)
-Τοποθεσία          Τηλέφωνο
-Γλυφάδα            215 215 2228
-Χαλάνδρι           215 215 2229
-Νέα Σμύρνη         215 215 2225
-Αιγάλεω            215 215 2227
-Βούλα              215 215 2230
-Αγία Παρασκευή     215 215 2226
+Τοποθεσία          Τηλέφωνο      Διεύθυνση
+Γλυφάδα            215 215 2228    Λεωφ. Βουλιαγμένης 101
+Χαλάνδρι           215 215 2229    Λεωφ. Κηφισιας 244
+Νέα Σμύρνη         215 215 2225    Λεωφ. Ανδρέα Συγγρού 151
+Χαϊδάρι            215 215 2227    Λεωφ. Αθηνών 267
+Βούλα              215 215 2230    Λεωφ. Γράμμου 9
+Αγία Παρασκευή     215 215 2226    Λεωφ. Μεσογείων 511
+Ίλιον              215 215 2231    Θηβών 484
 
 SPECIAL CASE: PRICE REQUEST
 If the user asks for a price:
